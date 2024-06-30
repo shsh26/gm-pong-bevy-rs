@@ -43,6 +43,12 @@ struct Player;
 #[derive(Component)]
 struct Ai;
 
+#[derive(Component)]
+struct PlayerScore;
+
+#[derive(Component)]
+struct AiScore;
+
 enum Scorer {
     Player,
     Ai,
@@ -169,16 +175,96 @@ fn update_score(
     println!("Score: {} - {}", score.player, score.ai);
 }
 
+#[derive(Component)]
+struct PlayerScoreboard;
+
+#[derive(Component)]
+struct AiScoreboard;
+
+fn update_scoreboard(
+    mut player_score: Query<
+        &mut Text,
+        With<PlayerScoreboard>
+    >,
+    mut ai_score: Query<
+        &mut Text,
+        (With<AiScoreboard>, Without<PlayerScoreboard>)
+    >,
+    score: Res<Score>,
+) {
+    if score.is_changed() {
+        if let Ok(mut player_score) = player_score.get_single_mut() {
+            player_score.sections[0].value = score.player.to_string();
+        }
+
+        if let Ok(mut ai_score) = ai_score.get_single_mut() {
+            ai_score.sections[0].value = score.ai.to_string();
+        }
+    }
+}
+
+fn spawn_scoreboard(
+    mut commands: Commands,
+) {
+    commands.spawn((
+        // Create a TextBundle that has a Text with a
+        // single section.
+        TextBundle::from_section(
+            // Accepts a `String` or any type that converts
+            // into a `String`, such as `&str`
+            "0",
+            TextStyle {
+                font_size: 72.0,
+                color: Color::WHITE,
+                ..default()
+            },
+        )
+            .with_text_justify(JustifyText::Center)
+            .with_style(Style {
+                position_type: PositionType::Absolute,
+                top: Val::Px(5.0),
+                right: Val::Px(15.0),
+                ..default()
+            }),
+        PlayerScore
+    ));
+
+    commands.spawn((
+        TextBundle::from_section(
+            "0",
+            TextStyle {
+                font_size: 72.0,
+                color: Color::WHITE,
+                ..default()
+            },
+        )
+            .with_text_justify(JustifyText::Center)
+            .with_style(Style {
+                position_type: PositionType::Absolute,
+                top: Val::Px(5.0),
+                left: Val::Px(15.0),
+                ..default()
+            }),
+        AiScore
+    ));
+}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .init_resource::<Score>()
         .add_event::<Scored>()
-        .add_systems(Startup, (spawn_camera, spawn_ball, spawn_paddle, spawn_gutter))
+        .add_systems(Startup, (
+            spawn_camera,
+            spawn_ball,
+            spawn_paddles,
+            spawn_gutter,
+            spawn_scoreboard,
+        ))
         .add_systems(Update, (
             move_ball,
             handle_player_input,
+            move_ai,
             detect_scoring,
             reset_ball.after(detect_scoring),
             update_score.after(detect_scoring),
@@ -212,7 +298,7 @@ fn spawn_ball(mut commands: Commands,
     }));
 }
 
-fn spawn_paddle(mut commands: Commands,
+fn spawn_paddles(mut commands: Commands,
                 mut meshs: ResMut<Assets<Mesh>>,
                 mut materials: ResMut<Assets<ColorMaterial>>,
                 window: Query<&Window>
@@ -311,52 +397,52 @@ fn project_positions(
     }
 }
 
-fn collide_with_side(
-    ball: BoundingCircle,
-    wall: Aabb2d,
-) -> Option<Collision> {
+fn collide_with_side(ball: BoundingCircle, wall: Aabb2d) -> Option<Collision> {
     if !ball.intersects(&wall) {
         return None;
     }
 
-    let closet_point = wall.closest_point(ball.center());
-    let offset = ball.center() - closet_point;
-
+    let closest = wall.closest_point(ball.center());
+    let offset = ball.center() - closest;
     let side = if offset.x.abs() > offset.y.abs() {
-        if offset.x > 0. {
-            Collision::Right
-        } else {
+        if offset.x < 0. {
             Collision::Left
-        }
-    } else {
-        if offset.y > 0. {
-            Collision::Top
         } else {
-            Collision::Bottom
+            Collision::Right
         }
+    } else if offset.y > 0. {
+        Collision::Top
+    } else {
+        Collision::Bottom
     };
 
     Some(side)
 }
 
 fn handle_collisions(
-    mut ball: Query<(&mut Position, &mut Velocity, &Shape), With<Ball>>,
+    mut ball: Query<(&mut Velocity, &Position, &Shape), With<Ball>>,
     other_things: Query<(&Position, &Shape), Without<Ball>>,
 ) {
-    if let Ok((
-    mut ball_velocity,
-    ball_position,
-    ball_shape)) = ball.get_single_mut() {
-        for (other_position, other_shape) in &other_things {
+    if let Ok((mut ball_velocity, ball_position, ball_shape)) = ball.get_single_mut() {
+        for (position, shape) in &other_things {
             if let Some(collision) = collide_with_side(
                 BoundingCircle::new(ball_position.0, ball_shape.0.x),
-                Aabb2d::new(other_position.0, other_shape.0 / 2.),
+                Aabb2d::new(
+                    position.0,
+                    shape.0 / 2.
+                )
             ) {
                 match collision {
-                    Collision::Left | Collision::Right => {
+                    Collision::Left => {
                         ball_velocity.0.x *= -1.;
                     }
-                    Collision::Top | Collision::Bottom => {
+                    Collision::Right => {
+                        ball_velocity.0.x *= -1.;
+                    }
+                    Collision::Top => {
+                        ball_velocity.0.y *= -1.;
+                    }
+                    Collision::Bottom => {
                         ball_velocity.0.y *= -1.;
                     }
                 }
@@ -393,6 +479,18 @@ fn move_paddles(
             if new_position.y.abs() < max_y {
                 position.0 = new_position;
             }
+        }
+    }
+}
+
+fn move_ai(
+    mut ai: Query<(&mut Velocity, &Position), With<Ai>>,
+    ball: Query<&Position, With<Ball>>,
+) {
+    if let Ok((mut velocity, position)) = ai.get_single_mut() {
+        if let Ok(ball_position) = ball.get_single() {
+            let a_to_b = ball_position.0 - position.0;
+            velocity.0.y = a_to_b.y.signum();
         }
     }
 }
